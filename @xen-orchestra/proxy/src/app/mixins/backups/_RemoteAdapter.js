@@ -1,9 +1,14 @@
 import asyncMap from '@xen-orchestra/async-map'
+import defer from 'golike-defer'
 import fromCallback from 'promise-toolbox/fromCallback'
 import pump from 'pump'
+import tmp from 'tmp'
 import Vhd, { createSyntheticStream, mergeVhd } from 'vhd-lib'
 import { basename, dirname, resolve } from 'path'
 import { createLogger } from '@xen-orchestra/log'
+import { decorateWith } from '@vates/decorate-with'
+import { execFile } from 'child_process'
+import { readdir, rmdir } from 'fs-extra'
 
 import { BACKUP_DIR } from './_getVmBackupDir'
 
@@ -18,6 +23,8 @@ const noop = Function.prototype
 
 const resolveRelativeFromFile = (file, path) =>
   resolve('/', dirname(file), path).slice(1)
+
+const RE_VHDI = /^vhdi(\d+)$/
 
 export class RemoteAdapter {
   constructor(handler) {
@@ -144,6 +151,42 @@ export class RemoteAdapter {
     }
 
     return backups.sort(compareTimestamp)
+  }
+
+  @decorateWith(defer)
+  async mountDisk($defer, diskId) {
+    const handler = this._handler
+
+    const diskPath = handler._getFilePath('/' + diskId)
+    const mountDir = await fromCallback(tmp.dir)
+    $defer.onFailure(rmdir, mountDir)
+
+    await fromCallback(execFile, 'vhdimount', [diskPath, mountDir])
+    $defer.onFailure(() => this.unmountDisk(mountDir))
+
+    let max = 0
+    let maxEntry
+    const entries = await readdir(mountDir)
+    entries.forEach(entry => {
+      const matches = RE_VHDI.exec(entry)
+      if (matches !== null) {
+        const value = +matches[1]
+        if (value > max) {
+          max = value
+          maxEntry = entry
+        }
+      }
+    })
+    if (max === 0) {
+      throw new Error('no disks found')
+    }
+
+    return `${mountDir}/${maxEntry}`
+  }
+
+  async unmountDisk(dir) {
+    await fromCallback(execFile, 'fusermount', ['-uz', dir])
+    await rmdir(dir)
   }
 
   async outputStream(input, path, { checksum = true, validator = noop } = {}) {
