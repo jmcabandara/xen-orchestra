@@ -165,9 +165,9 @@ export class RemoteAdapter {
     const diskPath = handler._getFilePath('/' + diskId)
     const mountDir = await fromCallback(tmp.dir)
     $defer.onFailure(rmdir, mountDir)
-    try {
-      await fromCallback(execFile, 'vhdimount', [diskPath, mountDir])
 
+    await fromCallback(execFile, 'vhdimount', [diskPath, mountDir])
+    try {
       let max = 0
       let maxEntry
       const entries = await readdir(mountDir)
