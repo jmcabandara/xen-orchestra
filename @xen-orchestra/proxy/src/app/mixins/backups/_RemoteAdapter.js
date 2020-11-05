@@ -8,9 +8,12 @@ import { basename, dirname, resolve } from 'path'
 import { createLogger } from '@xen-orchestra/log'
 import { decorateWith } from '@vates/decorate-with'
 import { execFile } from 'child_process'
+import { getHandler } from '@xen-orchestra/fs/dist'
 import { readdir, rmdir } from 'fs-extra'
 
 import { BACKUP_DIR } from './_getVmBackupDir'
+import { deduped } from './_deduped'
+import { disposable } from './_disposable'
 
 const { warn } = createLogger('xo:proxy:backups:RemoteAdapter')
 
@@ -153,8 +156,10 @@ export class RemoteAdapter {
     return backups.sort(compareTimestamp)
   }
 
+  @decorateWith(deduped)
+  @decorateWith(disposable)
   @decorateWith(defer)
-  async mountDisk($defer, diskId) {
+  async *mountDisk($defer, diskId) {
     const handler = this._handler
 
     const diskPath = handler._getFilePath('/' + diskId)
@@ -180,13 +185,12 @@ export class RemoteAdapter {
     if (max === 0) {
       throw new Error('no disks found')
     }
-
-    return `${mountDir}/${maxEntry}`
-  }
-
-  async unmountDisk(dir) {
-    await fromCallback(execFile, 'fusermount', ['-uz', dir])
-    await rmdir(dir)
+    try {
+      yield `${mountDir}/${maxEntry}`
+    } finally {
+      await fromCallback(execFile, 'fusermount', ['-uz', mountDir])
+      await rmdir(mountDir)
+    }
   }
 
   async outputStream(input, path, { checksum = true, validator = noop } = {}) {
@@ -245,3 +249,21 @@ export class RemoteAdapter {
     )
   }
 }
+
+export const getRemoteHandler = deduped(
+  disposable(async function* (remote) {
+    const handler = getHandler(remote)
+    await handler.sync()
+    try {
+      yield handler
+    } finally {
+      await handler.forget()
+    }
+  })
+)
+
+export const getRemoteAdapter = deduped(
+  disposable(function* (remote) {
+    return new RemoteAdapter(yield getRemoteHandler(remote))
+  })
+)
