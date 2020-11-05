@@ -165,27 +165,26 @@ export class RemoteAdapter {
     const diskPath = handler._getFilePath('/' + diskId)
     const mountDir = await fromCallback(tmp.dir)
     $defer.onFailure(rmdir, mountDir)
-
-    await fromCallback(execFile, 'vhdimount', [diskPath, mountDir])
-    $defer.onFailure(() => this.unmountDisk(mountDir))
-
-    let max = 0
-    let maxEntry
-    const entries = await readdir(mountDir)
-    entries.forEach(entry => {
-      const matches = RE_VHDI.exec(entry)
-      if (matches !== null) {
-        const value = +matches[1]
-        if (value > max) {
-          max = value
-          maxEntry = entry
-        }
-      }
-    })
-    if (max === 0) {
-      throw new Error('no disks found')
-    }
     try {
+      await fromCallback(execFile, 'vhdimount', [diskPath, mountDir])
+
+      let max = 0
+      let maxEntry
+      const entries = await readdir(mountDir)
+      entries.forEach(entry => {
+        const matches = RE_VHDI.exec(entry)
+        if (matches !== null) {
+          const value = +matches[1]
+          if (value > max) {
+            max = value
+            maxEntry = entry
+          }
+        }
+      })
+      if (max === 0) {
+        throw new Error('no disks found')
+      }
+
       yield `${mountDir}/${maxEntry}`
     } finally {
       await fromCallback(execFile, 'fusermount', ['-uz', mountDir])
