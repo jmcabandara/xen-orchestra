@@ -3,10 +3,10 @@ import defer from 'golike-defer'
 import fromCallback from 'promise-toolbox/fromCallback'
 import pump from 'pump'
 import tmp from 'tmp'
+import using from 'promise-toolbox/using'
 import Vhd, { createSyntheticStream, mergeVhd } from 'vhd-lib'
 import { basename, dirname, resolve } from 'path'
 import { createLogger } from '@xen-orchestra/log'
-import { decorateWith } from '@vates/decorate-with'
 import { execFile } from 'child_process'
 import { getHandler } from '@xen-orchestra/fs/dist'
 import { readdir, rmdir } from 'fs-extra'
@@ -14,6 +14,8 @@ import { readdir, rmdir } from 'fs-extra'
 import { BACKUP_DIR } from './_getVmBackupDir'
 import { deduped } from './_deduped'
 import { disposable } from './_disposable'
+import { listPartitions } from './_listPartitions'
+import { pvs } from './_lvm'
 
 const { warn } = createLogger('xo:proxy:backups:RemoteAdapter')
 
@@ -30,8 +32,19 @@ const resolveRelativeFromFile = (file, path) =>
 const RE_VHDI = /^vhdi(\d+)$/
 
 export class RemoteAdapter {
-  constructor(handler) {
+  constructor(handler, { defaultSettings }) {
     this._handler = handler
+
+    this.getDisk = deduped(
+      disposable(defer(this.getDisk)),
+      id => [id],
+      defaultSettings.resourceDebounce
+    )
+    this.getLvmPhysicalVolume = deduped(
+      disposable(this.getLvmPhysicalVolume),
+      (path, partition) => [path, partition?.id],
+      defaultSettings.resourceDebounce
+    )
   }
 
   async _deleteVhd(path) {
@@ -106,9 +119,6 @@ export class RemoteAdapter {
     )
   }
 
-  @decorateWith(deduped)
-  @decorateWith(disposable)
-  @decorateWith(defer)
   async *getDisk($defer, diskId) {
     const handler = this._handler
 
@@ -142,6 +152,26 @@ export class RemoteAdapter {
     }
   }
 
+  async *getLvmPhysicalVolume(devicePath, partition) {
+    const args = []
+    if (partition !== undefined) {
+      args.push('-o', partition.start * 512)
+    }
+    args.push('--show', '-f', devicePath)
+    const path = (await fromCallback(execFile, 'losetup', args)).trim()
+    try {
+      await fromCallback(execFile, 'pvscan', ['--cache', path])
+      yield path
+    } finally {
+      try {
+        const vgNames = await pvs('vg_name', path)
+        await fromCallback(execFile, 'vgchange', ['-an', ...vgNames])
+      } finally {
+        await fromCallback(execFile, 'losetup', ['-d', path])
+      }
+    }
+  }
+
   async listAllVmBackups() {
     const handler = this._handler
 
@@ -153,6 +183,48 @@ export class RemoteAdapter {
       })
     )
     return backups
+  }
+
+  listLvmLogicalVolumes(devicePath, partition) {
+    return using(
+      this.getLvmPhysicalVolume(devicePath, partition),
+      async path => {
+        const lvs = await pvs(
+          ['lv_name', 'lv_path', 'lv_size', 'vg_name'],
+          path
+        )
+        const partitionId = partition !== undefined ? partition.id : ''
+
+        const results = []
+        lvs.forEach((lv, i) => {
+          const name = lv.lv_name
+          if (name !== '') {
+            results.push({
+              id: `${partitionId}/${lv.vg_name}/${name}`,
+              name,
+              size: lv.lv_size,
+            })
+          }
+        })
+
+        return results
+      }
+    )
+  }
+
+  async listPartitions(devicePath, inspectLvmPv = true) {
+    const partitions = []
+    await Promise.all(
+      (await listPartitions(devicePath)).map(async partition => {
+        if (inspectLvmPv && partition.type === 'lvm') {
+          return partitions.push(
+            ...(await this.listLvmLogicalVolumes(devicePath, partition))
+          )
+        }
+        partitions.push(partition)
+      })
+    )
+    return partitions
   }
 
   async listVmBackups(vmUuid, predicate) {
@@ -249,20 +321,20 @@ export class RemoteAdapter {
   }
 }
 
-export const getRemoteHandler = deduped(
-  disposable(async function* (remote) {
-    const handler = getHandler(remote)
-    await handler.sync()
-    try {
-      yield handler
-    } finally {
-      await handler.forget()
-    }
-  })
-)
+const _getRemoteHandler = disposable(async function* (remote) {
+  const handler = getHandler(remote)
+  await handler.sync()
+  try {
+    yield handler
+  } finally {
+    await handler.forget()
+  }
+})
 
 export const getRemoteAdapter = deduped(
-  disposable(function* (remote) {
-    return new RemoteAdapter(yield getRemoteHandler(remote))
-  })
+  disposable(function* (remote, config) {
+    return new RemoteAdapter(yield _getRemoteHandler(remote), config)
+  }),
+  remote => [remote.url],
+  (_, config) => config.defaultSettings.resourceDebounce
 )
