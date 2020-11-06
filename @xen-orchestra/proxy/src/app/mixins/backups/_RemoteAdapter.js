@@ -159,7 +159,7 @@ export class RemoteAdapter {
   @decorateWith(deduped)
   @decorateWith(disposable)
   @decorateWith(defer)
-  async *mountDisk($defer, diskId) {
+  async *getDisk($defer, diskId) {
     const handler = this._handler
 
     const diskPath = handler._getFilePath('/' + diskId)
