@@ -106,6 +106,42 @@ export class RemoteAdapter {
     )
   }
 
+  @decorateWith(deduped)
+  @decorateWith(disposable)
+  @decorateWith(defer)
+  async *getDisk($defer, diskId) {
+    const handler = this._handler
+
+    const diskPath = handler._getFilePath('/' + diskId)
+    const mountDir = await fromCallback(tmp.dir)
+    $defer.onFailure(rmdir, mountDir)
+
+    await fromCallback(execFile, 'vhdimount', [diskPath, mountDir])
+    try {
+      let max = 0
+      let maxEntry
+      const entries = await readdir(mountDir)
+      entries.forEach(entry => {
+        const matches = RE_VHDI.exec(entry)
+        if (matches !== null) {
+          const value = +matches[1]
+          if (value > max) {
+            max = value
+            maxEntry = entry
+          }
+        }
+      })
+      if (max === 0) {
+        throw new Error('no disks found')
+      }
+
+      yield `${mountDir}/${maxEntry}`
+    } finally {
+      await fromCallback(execFile, 'fusermount', ['-uz', mountDir])
+      await rmdir(mountDir)
+    }
+  }
+
   async listAllVmBackups() {
     const handler = this._handler
 
@@ -154,42 +190,6 @@ export class RemoteAdapter {
     }
 
     return backups.sort(compareTimestamp)
-  }
-
-  @decorateWith(deduped)
-  @decorateWith(disposable)
-  @decorateWith(defer)
-  async *getDisk($defer, diskId) {
-    const handler = this._handler
-
-    const diskPath = handler._getFilePath('/' + diskId)
-    const mountDir = await fromCallback(tmp.dir)
-    $defer.onFailure(rmdir, mountDir)
-
-    await fromCallback(execFile, 'vhdimount', [diskPath, mountDir])
-    try {
-      let max = 0
-      let maxEntry
-      const entries = await readdir(mountDir)
-      entries.forEach(entry => {
-        const matches = RE_VHDI.exec(entry)
-        if (matches !== null) {
-          const value = +matches[1]
-          if (value > max) {
-            max = value
-            maxEntry = entry
-          }
-        }
-      })
-      if (max === 0) {
-        throw new Error('no disks found')
-      }
-
-      yield `${mountDir}/${maxEntry}`
-    } finally {
-      await fromCallback(execFile, 'fusermount', ['-uz', mountDir])
-      await rmdir(mountDir)
-    }
   }
 
   async outputStream(input, path, { checksum = true, validator = noop } = {}) {
